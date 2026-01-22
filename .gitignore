@@ -1,0 +1,7 @@
+node_modules
+.agent
+.shared
+# Enterprise Code (Private Submodule)
+packages/nox-enterprise/*
+!packages/nox-enterprise/README.md
+!packages/nox-enterprise/package.json

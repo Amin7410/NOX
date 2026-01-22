@@ -1,0 +1,650 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==========================================
+// 1. IAM & SECURITY
+// ==========================================
+
+model User {
+  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email              String    @unique
+  isEmailVerified    Boolean   @default(false) @map("is_email_verified")
+  fullName           String?   @map("full_name") @db.VarChar(255)
+  avatarUrl          String?   @map("avatar_url")
+  status             UserStatus @default(PENDING_VERIFICATION)
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt          DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+  deletedAt          DateTime? @map("deleted_at") @db.Timestamptz
+
+  // Relations
+  security           UserSecurity?
+  mfaBackupCodes     UserMfaBackupCode[]
+  sessions           UserSession[]
+  socialIdentities   SocialIdentity[]
+  orgMemberships     OrgMember[]
+  invitationsSent    Invitation[]
+  apiKeys            ApiKey[]
+  projectsCreated    Project[]
+  workspacesCreated  Workspace[]
+  blocksCreated      CoreBlock[]
+  snapshotsCreated   CoreSnapshot[]
+  comments           Comment[]
+  messages           ChatMessage[]
+  files              File[]
+  auditLogs          AuditLog[]
+  editLocks          EditLock[]
+  invitedOrgMembers  OrgMember[] @relation("MemberInviter")
+
+  @@map("users")
+  @@index([email])
+  @@index([status])
+}
+
+enum UserStatus {
+  PENDING_VERIFICATION
+  ACTIVE
+  BANNED
+  DELETED
+}
+
+model UserSecurity {
+  userId             String    @id @map("user_id") @db.Uuid
+  passwordHash       String?   @map("password_hash")
+  isPasswordSet      Boolean   @default(false) @map("is_password_set")
+  lastPasswordChange DateTime? @map("last_password_change") @db.Timestamptz
+  failedLoginAttempts Int      @default(0) @map("failed_login_attempts")
+  lockedUntil        DateTime? @map("locked_until") @db.Timestamptz
+  mfaEnabled         Boolean   @default(false) @map("mfa_enabled")
+  mfaSecret          String?   @map("mfa_secret")
+  updatedAt          DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+
+  user               User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_security")
+}
+
+model UserMfaBackupCode {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  codeHash  String    @map("code_hash") @db.VarChar(255)
+  used      Boolean   @default(false)
+  usedAt    DateTime? @map("used_at") @db.Timestamptz
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_mfa_backup_codes")
+  @@index([userId])
+}
+
+model UserSession {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId       String    @map("user_id") @db.Uuid
+  refreshToken String    @unique @map("refresh_token")
+  deviceType   String?   @map("device_type") @db.VarChar(50)
+  userAgent    String?   @map("user_agent")
+  ipAddress    String?   @map("ip_address") @db.VarChar(45)
+  lastActiveAt DateTime  @default(now()) @map("last_active_at") @db.Timestamptz
+  expiresAt    DateTime  @map("expires_at") @db.Timestamptz
+  revokedAt    DateTime? @map("revoked_at") @db.Timestamptz
+  revokeReason String?   @map("revoke_reason") @db.VarChar(50)
+
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_sessions")
+  @@index([userId])
+}
+
+model SocialIdentity {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId      String   @map("user_id") @db.Uuid
+  provider    String   @db.VarChar(50)
+  providerId  String   @map("provider_id") @db.VarChar(255)
+  profileData Json     @default("{}") @map("profile_data")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerId])
+  @@map("social_identities")
+  @@index([userId])
+}
+
+// ==========================================
+// 2. MULTI-TENANCY & BILLING
+// ==========================================
+
+model Organization {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name      String    @db.VarChar(255)
+  slug      String    @unique @db.VarChar(255)
+  settings  Json      @default("{}")
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz
+
+  // Relations
+  roles             Role[]
+  members           OrgMember[]
+  invitations       Invitation[]
+  subscription      Subscription?
+  usageMetrics      OrgUsageMetric[]
+  apiKeys           ApiKey[]
+  projects          Project[]
+  chatRooms         ChatRoom[]
+  auditLogs         AuditLog[]
+  featureOverrides  OrgFeatureOverride[]
+
+  @@map("organizations")
+  @@index([slug])
+}
+
+model Role {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId       String   @map("org_id") @db.Uuid
+  name        String   @db.VarChar(100)
+  permissions String[] @default([])
+
+  org         Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  members     OrgMember[]
+  invitations Invitation[]
+
+  @@unique([orgId, name])
+  @@map("roles")
+  @@index([orgId])
+}
+
+model OrgMember {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId     String   @map("org_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  roleId    String   @map("role_id") @db.Uuid
+  joinedAt  DateTime @default(now()) @map("joined_at") @db.Timestamptz
+  invitedBy String?  @map("invited_by") @db.Uuid
+
+  org       Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      Role         @relation(fields: [roleId], references: [id])
+  inviter   User?        @relation("MemberInviter", fields: [invitedBy], references: [id])
+
+  @@unique([orgId, userId])
+  @@map("org_members")
+  @@index([userId])
+  @@index([roleId])
+}
+
+model Invitation {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email       String    @db.VarChar(255)
+  orgId       String    @map("org_id") @db.Uuid
+  roleId      String    @map("role_id") @db.Uuid
+  token       String    @unique @db.VarChar(255)
+  invitedById String    @map("invited_by_id") @db.Uuid
+  status      InvitationStatus @default(PENDING)
+  expiresAt   DateTime  @map("expires_at") @db.Timestamptz
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  acceptedAt  DateTime? @map("accepted_at") @db.Timestamptz
+  resentCount Int       @default(0) @map("resent_count")
+  lastSentAt  DateTime? @map("last_sent_at") @db.Timestamptz
+
+  org         Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  role        Role         @relation(fields: [roleId], references: [id])
+  inviter     User         @relation(fields: [invitedById], references: [id])
+
+  @@unique([orgId, email])
+  @@map("invitations")
+  @@index([token])
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  EXPIRED
+  REVOKED
+}
+
+model Subscription {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId            String    @unique @map("org_id") @db.Uuid
+  planId           String    @map("plan_id") @db.VarChar(50)
+  status           SubStatus @default(ACTIVE)
+  stripeCustomerId String?   @map("stripe_customer_id") @db.VarChar(255)
+  stripeSubId      String?   @map("stripe_sub_id") @db.VarChar(255)
+  quotas           Json      @default("{}")
+  currentPeriodStart DateTime? @map("current_period_start") @db.Timestamptz
+  currentPeriodEnd   DateTime? @map("current_period_end") @db.Timestamptz
+  updatedAt        DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+
+  org              Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@map("subscriptions")
+  @@index([stripeCustomerId])
+}
+
+enum SubStatus {
+  ACTIVE
+  CANCELED
+  PAST_DUE
+  INCOMPLETE
+}
+
+model OrgUsageMetric {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId        String    @map("org_id") @db.Uuid
+  metricType   String    @map("metric_type") @db.VarChar(50)
+  currentValue BigInt    @default(0) @map("current_value")
+  resetAt      DateTime? @map("reset_at") @db.Timestamptz
+  updatedAt    DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+
+  org          Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, metricType])
+  @@map("org_usage_metrics")
+  @@index([orgId])
+}
+
+model ApiKey {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  keyHash    String    @unique @map("key_hash") @db.VarChar(255)
+  keyPrefix  String    @map("key_prefix") @db.VarChar(20)
+  name       String    @db.VarChar(255)
+  userId     String    @map("user_id") @db.Uuid
+  orgId      String    @map("org_id") @db.Uuid
+  scopes     String[]
+  lastUsedAt DateTime? @map("last_used_at") @db.Timestamptz
+  expiresAt  DateTime? @map("expires_at") @db.Timestamptz
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz
+
+  user       User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  org        Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@map("api_keys")
+  @@index([userId])
+  @@index([orgId])
+}
+
+// ==========================================
+// 3. WAREHOUSE & ASSETS
+// ==========================================
+
+model Warehouse {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ownerId   String    @map("owner_id") @db.Uuid
+  ownerType OwnerType @map("owner_type")
+  name      String?   @db.VarChar(255)
+  isSystem  Boolean   @default(false) @map("is_system")
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz
+
+  collections       AssetCollection[]
+  blockTemplates    AssetBlockTemplate[]
+  invaderDefinitions AssetInvaderDefinition[]
+
+  @@unique([ownerId, ownerType])
+  @@map("warehouses")
+}
+
+enum OwnerType {
+  USER
+  ORG
+}
+
+model AssetCollection {
+  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  warehouseId        String    @map("warehouse_id") @db.Uuid
+  name               String    @db.VarChar(255)
+  parentCollectionId String?   @map("parent_collection_id") @db.Uuid
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz
+
+  warehouse          Warehouse         @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+  parent             AssetCollection?  @relation("CollectionHierarchy", fields: [parentCollectionId], references: [id])
+  children           AssetCollection[] @relation("CollectionHierarchy")
+  blockTemplates     AssetBlockTemplate[]
+  invaderDefinitions AssetInvaderDefinition[]
+
+  @@unique([warehouseId, name])
+  @@map("asset_collections")
+  @@index([parentCollectionId])
+}
+
+model AssetBlockTemplate {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  warehouseId   String    @map("warehouse_id") @db.Uuid
+  collectionId  String?   @map("collection_id") @db.Uuid
+  name          String    @db.VarChar(255)
+  description   String?
+  thumbnailUrl  String?   @map("thumbnail_url")
+  structureData Json      @map("structure_data")
+  version       String    @default("1.0.0") @db.VarChar(20)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt     DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+  deletedAt     DateTime? @map("deleted_at") @db.Timestamptz
+
+  warehouse     Warehouse        @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+  collection    AssetCollection? @relation(fields: [collectionId], references: [id])
+  originBlocks  CoreBlock[]
+
+  @@map("assets_block_templates")
+  @@index([warehouseId, createdAt])
+  @@index([collectionId])
+}
+
+model AssetInvaderDefinition {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  warehouseId   String    @map("warehouse_id") @db.Uuid
+  collectionId  String?   @map("collection_id") @db.Uuid
+  code          String    @unique @db.VarChar(100)
+  name          String    @db.VarChar(255)
+  category      String    @db.VarChar(50)
+  configSchema  Json      @map("config_schema")
+  compilerHooks Json      @map("compiler_hooks")
+  version       String    @default("1.0.0") @db.VarChar(20)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt     DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+  deletedAt     DateTime? @map("deleted_at") @db.Timestamptz
+
+  warehouse     Warehouse        @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+  collection    AssetCollection? @relation(fields: [collectionId], references: [id])
+  usages        BlockInvaderUsage[]
+
+  @@map("assets_invader_definitions")
+  @@index([warehouseId, createdAt])
+  @@index([collectionId])
+}
+
+// ==========================================
+// 4. CORE ENGINE (RUNTIME)
+// ==========================================
+
+model Project {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId       String   @map("org_id") @db.Uuid
+  name        String   @db.VarChar(255)
+  slug        String   @db.VarChar(255)
+  description String?
+  visibility  ProjectVisibility @default(PRIVATE)
+  status      ProjectStatus @default(ACTIVE)
+  createdById String   @map("created_by_id") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+  deletedAt   DateTime? @map("deleted_at") @db.Timestamptz
+
+  org         Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  creator     User         @relation(fields: [createdById], references: [id])
+  workspaces  Workspace[]
+  snapshots   CoreSnapshot[]
+  chatRooms   ChatRoom[]
+  files       File[]
+
+  @@unique([orgId, slug])
+  @@map("projects")
+  @@index([orgId, createdAt])
+  @@index([createdById])
+}
+
+enum ProjectVisibility {
+  PRIVATE
+  PUBLIC
+  INTERNAL
+}
+
+enum ProjectStatus {
+  ACTIVE
+  ARCHIVED
+  DELETED
+}
+
+model Workspace {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId String   @map("project_id") @db.Uuid
+  name      String   @db.VarChar(255)
+  type      String   @db.VarChar(50)
+  createdBy String   @map("created_by") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz
+
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  creator   User     @relation(fields: [createdBy], references: [id])
+  blocks    CoreBlock[]
+  relations CoreRelation[]
+
+  @@map("workspaces")
+  @@index([projectId, createdAt])
+  @@index([createdBy])
+}
+
+model CoreBlock {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId   String   @map("workspace_id") @db.Uuid
+  parentBlockId String?  @map("parent_block_id") @db.Uuid
+  originAssetId String?  @map("origin_asset_id") @db.Uuid
+  type          String   @db.VarChar(50)
+  name          String   @db.VarChar(255)
+  config        Json     @default("{}")
+  visual        Json     @default("{}")
+  createdById   String?  @map("created_by_id") @db.Uuid
+  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+  deletedAt     DateTime? @map("deleted_at") @db.Timestamptz
+
+  workspace     Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  parentBlock   CoreBlock? @relation("BlockHierarchy", fields: [parentBlockId], references: [id], onDelete: Cascade)
+  childBlocks   CoreBlock[] @relation("BlockHierarchy")
+  originTemplate AssetBlockTemplate? @relation(fields: [originAssetId], references: [id])
+  creator       User?     @relation(fields: [createdById], references: [id])
+  
+  invaderUsages BlockInvaderUsage[]
+  sourceRelations CoreRelation[] @relation("SourceBlock")
+  targetRelations CoreRelation[] @relation("TargetBlock")
+
+  @@map("core_blocks")
+  @@index([workspaceId, type])
+  @@index([parentBlockId])
+  @@index([originAssetId])
+  @@index([createdById])
+}
+
+model BlockInvaderUsage {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  blockId        String   @map("block_id") @db.Uuid
+  invaderAssetId String   @map("invader_asset_id") @db.Uuid
+  appliedVersion String?  @map("applied_version") @db.VarChar(20)
+  configSnapshot Json?    @map("config_snapshot")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  block          CoreBlock              @relation(fields: [blockId], references: [id], onDelete: Cascade)
+  invaderDef     AssetInvaderDefinition @relation(fields: [invaderAssetId], references: [id], onDelete: Cascade)
+
+  @@unique([blockId, invaderAssetId])
+  @@map("block_invader_usages")
+  @@index([invaderAssetId])
+}
+
+model CoreRelation {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId   String    @map("workspace_id") @db.Uuid
+  sourceBlockId String    @map("source_block_id") @db.Uuid
+  targetBlockId String    @map("target_block_id") @db.Uuid
+  type          String    @db.VarChar(50)
+  rules         Json      @default("{}")
+  visual        Json      @default("{}")
+  deletedAt     DateTime? @map("deleted_at") @db.Timestamptz
+
+  workspace     Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  sourceBlock   CoreBlock @relation("SourceBlock", fields: [sourceBlockId], references: [id], onDelete: Cascade)
+  targetBlock   CoreBlock @relation("TargetBlock", fields: [targetBlockId], references: [id], onDelete: Cascade)
+
+  @@unique([sourceBlockId, targetBlockId])
+  @@map("core_relations")
+  @@index([workspaceId])
+  @@index([targetBlockId])
+}
+
+model CoreSnapshot {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId     String   @map("project_id") @db.Uuid
+  name          String   @db.VarChar(255)
+  commitMessage String?  @map("commit_message")
+  fullStateDump Json     @map("full_state_dump")
+  createdById   String   @map("created_by_id") @db.Uuid
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  project       Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  creator       User     @relation(fields: [createdById], references: [id])
+
+  @@map("core_snapshots")
+  @@index([projectId, createdAt])
+  @@index([createdById])
+}
+
+// ==========================================
+// 5. COLLABORATION & OPS
+// ==========================================
+
+model Comment {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  authorId        String    @map("author_id") @db.Uuid
+  targetType      String    @map("target_type") @db.VarChar(50)
+  targetId        String    @map("target_id") @db.Uuid
+  content         String
+  parentCommentId String?   @map("parent_comment_id") @db.Uuid
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  deletedAt       DateTime? @map("deleted_at") @db.Timestamptz
+
+  author          User      @relation(fields: [authorId], references: [id])
+  parentComment   Comment?  @relation("CommentThread", fields: [parentCommentId], references: [id])
+  replies         Comment[] @relation("CommentThread")
+
+  @@map("comments")
+  @@index([targetType, targetId, createdAt])
+  @@index([authorId])
+  @@index([parentCommentId])
+}
+
+model ChatRoom {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId     String   @map("org_id") @db.Uuid
+  projectId String?  @map("project_id") @db.Uuid
+  name      String   @db.VarChar(255)
+  
+  org       Organization @relation(fields: [orgId], references: [id])
+  project   Project?     @relation(fields: [projectId], references: [id])
+  messages  ChatMessage[]
+
+  @@map("chat_rooms")
+  @@index([orgId])
+  @@index([projectId])
+}
+
+model ChatMessage {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  roomId    String   @map("room_id") @db.Uuid
+  senderId  String?  @map("sender_id") @db.Uuid
+  content   String
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  room      ChatRoom @relation(fields: [roomId], references: [id])
+  sender    User?    @relation(fields: [senderId], references: [id])
+
+  @@map("chat_messages")
+  @@index([roomId, createdAt])
+  @@index([senderId])
+}
+
+model File {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  uploaderId  String    @map("uploader_id") @db.Uuid
+  projectId   String    @map("project_id") @db.Uuid
+  fileName    String    @map("file_name") @db.VarChar(255)
+  mimeType    String    @map("mime_type") @db.VarChar(100)
+  fileSize    BigInt    @map("file_size")
+  storagePath String    @map("storage_path")
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  deletedAt   DateTime? @map("deleted_at") @db.Timestamptz
+
+  uploader    User      @relation(fields: [uploaderId], references: [id])
+  project     Project   @relation(fields: [projectId], references: [id])
+  attachments FileAttachment[]
+
+  @@map("files")
+  @@index([projectId, createdAt])
+  @@index([uploaderId])
+}
+
+model FileAttachment {
+  id         String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  fileId     String @map("file_id") @db.Uuid
+  targetType String @map("target_type") @db.VarChar(50)
+  targetId   String @map("target_id") @db.Uuid
+
+  file       File   @relation(fields: [fileId], references: [id])
+
+  @@unique([fileId, targetType, targetId])
+  @@map("file_attachments")
+  @@index([targetType, targetId])
+}
+
+model AuditLog {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId      String   @map("org_id") @db.Uuid
+  actorId    String   @map("actor_id") @db.Uuid
+  action     String   @db.VarChar(100)
+  targetType String?  @map("target_type") @db.VarChar(50)
+  targetId   String?  @map("target_id") @db.Uuid
+  metadata   Json?
+  ipAddress  String?  @map("ip_address") @db.VarChar(45)
+  userAgent  String?  @map("user_agent")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  org        Organization @relation(fields: [orgId], references: [id])
+  actor      User         @relation(fields: [actorId], references: [id])
+
+  @@map("audit_logs")
+  @@index([orgId, createdAt])
+  @@index([targetType, targetId])
+  @@index([actorId])
+}
+
+model EditLock {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  resourceType String   @map("resource_type") @db.VarChar(50)
+  resourceId   String   @map("resource_id") @db.Uuid
+  lockedBy     String   @map("locked_by") @db.Uuid
+  expiresAt    DateTime @map("expires_at") @db.Timestamptz
+
+  locker       User     @relation(fields: [lockedBy], references: [id])
+
+  @@unique([resourceType, resourceId])
+  @@map("edit_locks")
+  @@index([lockedBy])
+}
+
+model FeatureFlag {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  key          String   @unique @db.VarChar(100)
+  description  String?
+  defaultValue Json     @map("default_value")
+
+  overrides    OrgFeatureOverride[]
+
+  @@map("feature_flags")
+}
+
+model OrgFeatureOverride {
+  id            String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId         String @map("org_id") @db.Uuid
+  featureFlagId String @map("feature_flag_id") @db.Uuid
+  value         Json
+
+  org           Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  featureFlag   FeatureFlag  @relation(fields: [featureFlagId], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, featureFlagId])
+  @@map("org_feature_overrides")
+  @@index([featureFlagId])
+}

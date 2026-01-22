@@ -1,0 +1,18 @@
+{
+    "extends": "@nox/tsconfig/nest.json",
+    "compilerOptions": {
+        "outDir": "./dist",
+        "baseUrl": "./",
+        "paths": {
+            "@nox/database": [
+                "../../packages/database"
+            ],
+            "@nox/*": [
+                "../../packages/*"
+            ]
+        }
+    },
+    "include": [
+        "src/**/*"
+    ]
+}
